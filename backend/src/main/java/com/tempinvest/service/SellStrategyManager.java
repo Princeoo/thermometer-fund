@@ -106,8 +106,70 @@ public class SellStrategyManager {
         }
     }
 
-    // 其他方法将在后续任务中实现
-    public SellResult checkBatchProfit(Long userId, String fundCode) { return null; }
+    /**
+     * 检查分批止盈
+     */
+    public SellResult checkBatchProfit(Long userId, String fundCode) {
+        UserFund userFund = userFundMapper.selectByUserIdAndCode(userId, fundCode);
+        FundInfo fundInfo = fundInfoMapper.selectByCode(fundCode);
+
+        if (userFund == null || fundInfo == null) {
+            return null;
+        }
+
+        BigDecimal profitRate = calculateProfitRate(userFund, fundInfo);
+        if (profitRate == null) return null;
+
+        // 确定档位
+        int tier = determineProfitTier(profitRate);
+        if (tier == 0) return null;
+
+        // 检查是否已执行
+        if (isTierExecuted(userFund.getProfitTierExecuted(), tier)) {
+            return null;
+        }
+
+        // 触发止盈
+        BigDecimal sellRatio = getTierSellRatio(tier);
+        BigDecimal sellAmount = userFund.getCurrentHolding().multiply(sellRatio);
+        String reason = String.format("收益率达到%.2f%%，触发第%d档止盈",
+            profitRate.multiply(new BigDecimal("100")), tier);
+
+        return new SellResult(sellAmount, reason, "BATCH_PROFIT");
+    }
+
+    /**
+     * 确定收益率档位
+     */
+    private int determineProfitTier(BigDecimal profitRate) {
+        BigDecimal rate100 = profitRate.multiply(new BigDecimal("100"));
+        if (rate100.compareTo(new BigDecimal("50")) >= 0) return 4;
+        if (rate100.compareTo(new BigDecimal("40")) >= 0) return 3;
+        if (rate100.compareTo(new BigDecimal("30")) >= 0) return 2;
+        if (rate100.compareTo(new BigDecimal("20")) >= 0) return 1;
+        return 0;
+    }
+
+    /**
+     * 获取档位卖出比例
+     */
+    private BigDecimal getTierSellRatio(int tier) {
+        switch (tier) {
+            case 1: return new BigDecimal("0.30");
+            case 2: return new BigDecimal("0.40");
+            case 3: return new BigDecimal("0.50");
+            case 4: return new BigDecimal("0.60");
+            default: return BigDecimal.ZERO;
+        }
+    }
+
+    /**
+     * 检查档位是否已执行
+     */
+    private boolean isTierExecuted(Integer executedMask, int tier) {
+        if (executedMask == null) return false;
+        return (executedMask & (1 << (tier - 1))) != 0;
+    }
     public SellResult checkMultiFactorSignal(Long userId, String fundCode) { return null; }
     public boolean validateCooldown(Long userId, String fundCode, String strategyType) { return true; }
 }

@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.temporal.ChronoUnit;
 
 @Service
 public class SellStrategyManager {
@@ -170,6 +171,121 @@ public class SellStrategyManager {
         if (executedMask == null) return false;
         return (executedMask & (1 << (tier - 1))) != 0;
     }
-    public SellResult checkMultiFactorSignal(Long userId, String fundCode) { return null; }
-    public boolean validateCooldown(Long userId, String fundCode, String strategyType) { return true; }
+    /**
+     * 检查多因子信号
+     */
+    public SellResult checkMultiFactorSignal(Long userId, String fundCode) {
+        UserFund userFund = userFundMapper.selectByUserIdAndCode(userId, fundCode);
+        FundInfo fundInfo = fundInfoMapper.selectByCode(fundCode);
+
+        if (userFund == null || fundInfo == null) {
+            return null;
+        }
+
+        // 计算各因子得分
+        int temperatureScore = calculateTemperatureFactor(fundInfo.getTemperature());
+        int trendScore = calculateTrendFactor(fundInfo);
+        int holdingScore = calculateHoldingFactor(userFund, fundInfo);
+        int sentimentScore = calculateSentimentFactor(fundInfo);
+
+        // 加权求和
+        int totalScore = (int)(temperatureScore * 0.4 + trendScore * 0.3 +
+                               holdingScore * 0.2 + sentimentScore * 0.1);
+
+        // 判断是否触发
+        if (totalScore >= 70) {
+            BigDecimal sellAmount = userFund.getCurrentHolding().multiply(new BigDecimal("0.4"));
+            String reason = String.format("多因子信号强烈：得分%d（温度%d+趋势%d+持仓%d+情绪%d）",
+                totalScore, temperatureScore, trendScore, holdingScore, sentimentScore);
+            return new SellResult(sellAmount, reason, "MULTI_FACTOR");
+        } else if (totalScore >= 50) {
+            BigDecimal sellAmount = userFund.getCurrentHolding().multiply(new BigDecimal("0.2"));
+            String reason = String.format("多因子信号中等：得分%d", totalScore);
+            return new SellResult(sellAmount, reason, "MULTI_FACTOR");
+        }
+
+        return null;
+    }
+
+    /**
+     * 验证冷却期
+     */
+    public boolean validateCooldown(Long userId, String fundCode, String strategyType) {
+        UserFund userFund = userFundMapper.selectByUserIdAndCode(userId, fundCode);
+        if (userFund == null) return false;
+
+        if (userFund.getLastSellDate() == null) {
+            return true;
+        }
+
+        long daysSinceLastSell = ChronoUnit.DAYS.between(
+            userFund.getLastSellDate().atStartOfDay(),
+            java.time.LocalDate.now().atStartOfDay()
+        );
+
+        int cooldownDays = userFund.getSellCooldownDays() != null ? userFund.getSellCooldownDays() : 7;
+        if ("TRAILING_STOP".equals(strategyType)) {
+            cooldownDays = cooldownDays / 2;
+        }
+
+        FundInfo fundInfo = fundInfoMapper.selectByCode(fundCode);
+        if (fundInfo != null && fundInfo.getTemperature() != null && fundInfo.getTemperature() > 95) {
+            return true;
+        }
+
+        return daysSinceLastSell >= cooldownDays;
+    }
+
+    /**
+     * 温度因子计算
+     */
+    private int calculateTemperatureFactor(Integer temperature) {
+        if (temperature == null) return 0;
+        if (temperature > 90) return 100;
+        if (temperature > 80) return 80;
+        if (temperature > 70) return 60;
+        if (temperature > 60) return 40;
+        return 0;
+    }
+
+    /**
+     * 趋势因子计算
+     */
+    private int calculateTrendFactor(FundInfo fundInfo) {
+        if (fundInfo.getDailyChange() == null) return 0;
+        BigDecimal change = fundInfo.getDailyChange();
+        if (change.compareTo(new BigDecimal("3")) > 0) return 40;
+        if (change.compareTo(new BigDecimal("2")) > 0) return 30;
+        if (change.compareTo(new BigDecimal("-2")) < 0) return -30;
+        return 0;
+    }
+
+    /**
+     * 持仓因子计算
+     */
+    private int calculateHoldingFactor(UserFund userFund, FundInfo fundInfo) {
+        BigDecimal profitRate = calculateProfitRate(userFund, fundInfo);
+        if (profitRate == null) return 0;
+        BigDecimal rate100 = profitRate.multiply(new BigDecimal("100"));
+        if (rate100.compareTo(new BigDecimal("30")) > 0) return 100;
+        if (rate100.compareTo(new BigDecimal("20")) > 0) return 80;
+        if (rate100.compareTo(new BigDecimal("10")) > 0) return 50;
+        return 0;
+    }
+
+    /**
+     * 情绪因子计算
+     */
+    private int calculateSentimentFactor(FundInfo fundInfo) {
+        if (fundInfo.getPePercentile() == null || fundInfo.getPbPercentile() == null) return 0;
+        if (fundInfo.getPePercentile().compareTo(new BigDecimal("90")) > 0 &&
+            fundInfo.getPbPercentile().compareTo(new BigDecimal("80")) > 0) {
+            return 20;
+        }
+        if (fundInfo.getPePercentile().compareTo(new BigDecimal("30")) < 0 &&
+            fundInfo.getPbPercentile().compareTo(new BigDecimal("30")) < 0) {
+            return -20;
+        }
+        return 0;
+    }
 }
